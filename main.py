@@ -1,152 +1,172 @@
 import os
 import streamlit as st
 import pandas as pd
-from io import StringIO
+import requests
 from sentence_transformers import SentenceTransformer
 import chromadb
-from chromadb.config import Settings
-import requests
+from io import StringIO
 
-# ---------------------------------------------------
-# STREAMLIT SETTINGS
-# ---------------------------------------------------
-st.set_page_config(page_title="Movie Recommender (Semantic + Chroma)", layout="wide")
+# -----------------------------------
+# Streamlit page
+# -----------------------------------
+st.set_page_config(page_title="Movie Recommender", layout="wide")
 
-# ---------------------------------------------------
-# LOAD DATA
-# ---------------------------------------------------
+# -----------------------------------
+# TMDB API
+# -----------------------------------
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
+
+def tmdb_get(title):
+    if not TMDB_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://api.themoviedb.org/3/search/movie",
+            params={"api_key": TMDB_API_KEY, "query": title},
+            timeout=10
+        )
+        r.raise_for_status()
+        results = r.json().get("results", [])
+        if not results:
+            return None
+        movie = results[0]
+
+        details = requests.get(
+            f"https://api.themoviedb.org/3/movie/{movie['id']}",
+            params={"api_key": TMDB_API_KEY},
+            timeout=10
+        ).json()
+
+        poster = movie.get("poster_path")
+        poster_url = TMDB_IMAGE_BASE + poster if poster else None
+
+        imdb_id = requests.get(
+            f"https://api.themoviedb.org/3/movie/{movie['id']}/external_ids",
+            params={"api_key": TMDB_API_KEY}
+        ).json().get("imdb_id")
+
+        imdb_link = f"https://www.imdb.com/title/{imdb_id}" if imdb_id else None
+
+        return {
+            "poster": poster_url,
+            "rating": details.get("vote_average"),
+            "imdb_link": imdb_link
+        }
+    except:
+        return None
+
+
+# -----------------------------------
+# Load data
+# -----------------------------------
 @st.cache_data
 def load_data():
-    df = pd.read_csv("netflixData.csv")
-
-    # Normalize title column
-    if "Title" not in df.columns:
-        raise ValueError("Your dataset MUST contain a column named 'Title'.")
-
-    df["title"] = df["Title"].astype(str)
-    df["description"] = df["Description"].fillna("").astype(str)
-    df["genres"] = df["Genres"].fillna("").astype(str)
-
-    # Extract year
-    def get_year(x):
-        try:
-            return int(str(x)[:4])
-        except:
-            return None
-
-    if "Release Date" in df.columns:
-        df["year"] = df["Release Date"].apply(get_year)
-    else:
-        df["year"] = None
-
-    df["combined"] = df["title"] + " " + df["genres"] + " " + df["description"]
-    return df
+    return pd.read_csv("netflixData.csv")
 
 df = load_data()
 
-# ---------------------------------------------------
-# EMBEDDING MODEL
-# ---------------------------------------------------
+df["title"] = df["Title"].astype(str)
+df["desc"] = df["Description"].fillna("").astype(str)
+df["genres"] = df["Genres"].fillna("").astype(str)
+df["year"] = df["Release Date"].fillna(0).astype(int)
+
+# -----------------------------------
+# Embedding model
+# -----------------------------------
 @st.cache_resource
-def load_embedder():
+def get_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-embedder = load_embedder()
+model = get_model()
 
-# ---------------------------------------------------
-# CHROMA INIT
-# ---------------------------------------------------
+# -----------------------------------
+# Chroma (in-memory ONLY)
+# -----------------------------------
 @st.cache_resource
 def init_chroma():
-    settings = Settings(
-        chroma_db_impl="duckdb+parquet",
-        persist_directory="./chroma_store"
-    )
-    return chromadb.Client(settings)
+    client = chromadb.Client()  # in-memory
+    collection = client.create_collection("movies")
 
-client = init_chroma()
-
-# Create / Load collection
-COLLECTION_NAME = "movies_embeddings"
-try:
-    collection = client.get_collection(COLLECTION_NAME)
-except:
-    collection = client.create_collection(COLLECTION_NAME)
-
-# ---------------------------------------------------
-# POPULATE CHROMA IF EMPTY
-# ---------------------------------------------------
-def populate_chroma():
-    if collection.count() > 0:
-        return
-
-    texts = df["combined"].tolist()
+    documents = (df["title"] + ". " + df["desc"]).tolist()
     ids = df.index.astype(str).tolist()
+    embeddings = model.encode(documents).tolist()
 
-    embeddings = embedder.encode(texts, convert_to_numpy=True).tolist()
-
-    collection.add(
-        documents=texts,
-        ids=ids,
-        metadatas=df[["title", "genres", "description", "year"]].to_dict(orient="records"),
-        embeddings=embeddings
-    )
-
-    client.persist()
-
-populate_chroma()
-
-# ---------------------------------------------------
-# SEMANTIC SEARCH
-# ---------------------------------------------------
-def semantic_search(query, top_k=10):
-    emb = embedder.encode([query], convert_to_numpy=True).tolist()
-
-    results = collection.query(
-        query_embeddings=emb,
-        n_results=top_k,
-        include=["metadatas", "documents", "distances"]
-    )
-
-    hits = []
-    for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
-        hits.append({
-            "title": meta.get("title", ""),
-            "genres": meta.get("genres", ""),
-            "description": meta.get("description", ""),
-            "year": meta.get("year", None),
-            "distance": dist
+    metas = []
+    for _, row in df.iterrows():
+        metas.append({
+            "title": row["title"],
+            "genres": row["genres"],
+            "year": int(row["year"]) if row["year"] else None,
+            "desc": row["desc"]
         })
 
-    return hits
+    collection.add(
+        ids=ids,
+        documents=documents,
+        embeddings=embeddings,
+        metadatas=metas
+    )
 
-# ---------------------------------------------------
+    return collection
+
+collection = init_chroma()
+
+# -----------------------------------
 # UI
-# ---------------------------------------------------
-st.title("🎬 Movie Recommender — Semantic Search (Chroma)")
+# -----------------------------------
+st.title("🎬 Movie Recommender — Semantic Search + Posters")
 
-query = st.text_input("اكتب اسم الفيلم أو وصف للفيلم:")
-
-top_k = st.slider("عدد النتائج:", 5, 30, 10)
+query = st.text_input("اكتب اسم فيلم أو وصف:")
+topk = st.slider("عدد النتائج:", 5, 30, 10)
 
 if st.button("Search"):
-    if query.strip() == "":
-        st.warning("من فضلك اكتب استعلام.")
+    if not query.strip():
+        st.warning("اكتب اسم فيلم أو وصف")
     else:
-        results = semantic_search(query, top_k)
+        query_emb = model.encode([query]).tolist()
 
-        st.success(f"تم العثور على {len(results)} نتيجة")
+        res = collection.query(
+            query_embeddings=query_emb,
+            n_results=topk
+        )
 
-        for r in results:
-            st.markdown(f"""
-                ### 🎥 {r['title']} ({r['year']})
-                **Genres:** {r['genres']}  
-                **Distance:** {round(r['distance'], 4)}  
+        hits = []
+        for meta, distance in zip(res["metadatas"][0], res["distances"][0]):
+            hits.append({
+                "title": meta["title"],
+                "genres": meta["genres"],
+                "desc": meta["desc"],
+                "year": meta["year"],
+                "distance": distance
+            })
 
-                {r['description'][:400]}...
-                ---
-            """)
+        for h in hits:
+            tmdb = tmdb_get(h["title"])
 
-# Dataset Debug Info
-with st.expander("Dataset Preview"):
-    st.write(df.head())
+            col1, col2 = st.columns([1, 3])
+
+            with col1:
+                if tmdb and tmdb["poster"]:
+                    st.image(tmdb["poster"], use_column_width=True)
+                else:
+                    st.write("no poster")
+
+            with col2:
+                st.markdown(f"### {h['title']} ({h['year']})")
+                st.write(f"**Genres:** {h['genres']}")
+                st.write(h["desc"][:500] + "...")
+                st.write(f"Distance: {round(h['distance'],4)}")
+                if tmdb and tmdb["rating"]:
+                    st.write(f"TMDB Rating: {tmdb['rating']}")
+                if tmdb and tmdb["imdb_link"]:
+                    st.write(f"[IMDb]({tmdb['imdb_link']})")
+
+        # download CSV
+        out = pd.DataFrame(hits)
+        st.download_button(
+            "📥 Download as CSV",
+            out.to_csv(index=False),
+            "results.csv",
+            "text/csv"
+        )
