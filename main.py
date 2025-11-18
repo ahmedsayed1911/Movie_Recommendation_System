@@ -35,7 +35,8 @@ EMBEDDER_MODEL = os.getenv("EMBEDDER_MODEL", "all-MiniLM-L6-v2")
 def load_data(path="/mnt/data/netflixData.csv") -> pd.DataFrame:
     df = pd.read_csv(path)
     # Normalize column names
-    cols = {c: c.strip(): c.strip() for c in df.columns} if False else {c: c.strip() for c in df.columns}
+    cols = {c: c.strip() for c in df.columns}
+    if False else {c: c.strip() for c in df.columns}
     df.rename(columns=cols, inplace=True)
     if 'Title' not in df.columns and 'title' in df.columns:
         df.rename(columns={'title': 'Title'}, inplace=True)
