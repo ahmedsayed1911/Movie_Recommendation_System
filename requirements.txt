@@ -1,9 +1,6 @@
 streamlit
 pandas
-numpy
+scikit-learn
 requests
 sentence-transformers
 chromadb
-duckdb
-tqdm
-scikit-learn
