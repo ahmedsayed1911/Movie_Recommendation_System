@@ -29,97 +29,88 @@ CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 EMBEDDER_MODEL = os.getenv("EMBEDDER_MODEL", "all-MiniLM-L6-v2")
 
 # ------------------------------
-# Load data with multiple path fallbacks
+# Load data
 # ------------------------------
 @st.cache_data(show_spinner=False)
-def load_data(path_candidates=None) -> pd.DataFrame:
-    if path_candidates is None:
-        path_candidates = [
-            "netflixData.csv",           # repo root (recommended)
-            "./netflixData.csv",
-            "/mnt/data/netflixData.csv"  # environment like this session
-        ]
-    df = None
-    for p in path_candidates:
-        try:
-            if os.path.exists(p):
-                df = pd.read_csv(p)
-                break
-        except Exception:
-            continue
-    if df is None:
-        # final attempt: try reading relative path and let pandas raise clear error
-        df = pd.read_csv(path_candidates[0])
-
-    # Normalize column names (trim)
-    df.columns = [c.strip() for c in df.columns]
-
-    # Accept Title or title
+def load_data(path="/mnt/data/netflixData.csv") -> pd.DataFrame:
+    df = pd.read_csv(path)
+    # Normalize column names
+    cols = {c: c.strip(): c.strip() for c in df.columns} if False else {c: c.strip() for c in df.columns}
+    df.rename(columns=cols, inplace=True)
+    if 'Title' not in df.columns and 'title' in df.columns:
+        df.rename(columns={'title': 'Title'}, inplace=True)
     if 'Title' not in df.columns:
-        if 'title' in df.columns:
-            df.rename(columns={'title': 'Title'}, inplace=True)
-        else:
-            raise ValueError("Data must contain a 'Title' column.")
+        raise ValueError("Data must contain a 'Title' column.")
+    for c in ['Description', 'Genres', 'Release Date', 'Release_Date', 'Year']:
+        if c not in df.columns:
+            df[c] = pd.NA
 
-    # Ensure Description/Genres columns exist
-    if 'Description' not in df.columns:
-        # try lowercase
-        if 'description' in df.columns:
-            df.rename(columns={'description': 'Description'}, inplace=True)
-        else:
-            df['Description'] = pd.NA
-
-    if 'Genres' not in df.columns:
-        if 'genres' in df.columns:
-            df.rename(columns={'genres': 'Genres'}, inplace=True)
-        else:
-            df['Genres'] = pd.NA
-
-    # Create consistent fields
     df['title'] = df['Title'].astype(str)
     df['description'] = df['Description'].fillna("").astype(str)
     df['genres'] = df['Genres'].fillna("").astype(str)
 
-    # Try to parse a year from common columns
     def extract_year(row):
-        for c in ['Year', 'year', 'Release Date', 'Release_Date', 'release_date', 'Date Added']:
-            if c in row and pd.notna(row[c]):
-                try:
-                    s = str(row[c])
-                    # find first 4-digit substring
-                    import re
-                    m = re.search(r"(19|20)\d{2}", s)
-                    if m:
-                        return int(m.group(0))
-                except:
-                    pass
+        for c in ['Year', 'Release Date', 'Release_Date', 'release_date']:
+            v = row.get(c)
+            if pd.isna(v):
+                continue
+            try:
+                s = str(v)
+                if len(s) >= 4:
+                    y = int(s[:4])
+                    return y
+            except:
+                continue
         return np.nan
 
     df['year'] = df.apply(extract_year, axis=1)
     df['combined'] = (df['genres'] + " " + df['description']).str.strip().fillna("")
     return df.reset_index(drop=True)
 
-# Load dataset (will try multiple locations)
-df = load_data()
+# load from repo path (Streamlit Cloud will use the repo root)
+try:
+    df = load_data("/mnt/data/netflixData.csv")
+except Exception:
+    # fallback to relative path in repo if you committed the csv
+    df = load_data("netflixData.csv")
 
 # ------------------------------
-# Chroma + Embeddings init
+# Chroma + Embeddings init (robust)
 # ------------------------------
 @st.cache_resource(show_spinner=False)
-def init_chroma():
-    settings = Settings(chroma_db_impl="duckdb+parquet", persist_directory=CHROMA_PERSIST_DIR)
-    client = chromadb.Client(settings=settings)
-    return client
+def init_chroma(persist_dir: str = CHROMA_PERSIST_DIR):
+    # ensure dir exists
+    try:
+        os.makedirs(persist_dir, exist_ok=True)
+    except Exception:
+        pass
+
+    # Try preferred persistent settings (duckdb+parquet). If chromadb config raises, fall back to default Client()
+    try:
+        settings = Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_dir)
+        client = chromadb.Client(settings=settings)
+        st.info("Chroma: using duckdb+parquet persistence.")
+        return client
+    except Exception as e:
+        st.warning(f"Chroma persistent init failed, falling back to in-memory client. ({e})")
+        try:
+            client = chromadb.Client()
+            return client
+        except Exception as e2:
+            st.error(f"Failed to init chromadb client: {e2}")
+            raise
 
 chroma_client = init_chroma()
 
 @st.cache_data(show_spinner=False)
 def get_embedder(model_name=EMBEDDER_MODEL):
+    # sentence-transformers will download model on first run (may take time)
     model = SentenceTransformer(model_name)
     return model
 
 embedder = get_embedder()
 
+# helper: collection name
 COLLECTION_NAME = "netflix_movies_v1"
 
 def create_or_get_collection():
@@ -131,6 +122,7 @@ def create_or_get_collection():
 
 collection = create_or_get_collection()
 
+# populate collection if empty
 @st.cache_data(show_spinner=True)
 def ensure_collection_populated(df: pd.DataFrame, collection) -> None:
     try:
@@ -200,7 +192,7 @@ def tmdb_get_movie(movie_id: int):
         return None
 
 # ------------------------------
-# Semantic search
+# Semantic search functions
 # ------------------------------
 def semantic_search_by_text(query: str, top_k=10, filters: Optional[Dict]=None):
     emb = embedder.encode([query], convert_to_numpy=True)[0].tolist()
@@ -223,7 +215,7 @@ def semantic_search_by_text(query: str, top_k=10, filters: Optional[Dict]=None):
             "description": meta.get('description'),
             "score": float(score)
         })
-    # post filters
+    # post filtering
     if filters:
         if 'genres' in filters and filters['genres']:
             selected = [g.strip().lower() for g in filters['genres']]
@@ -252,7 +244,7 @@ def semantic_search_by_title(title: str, top_k=10, filters: Optional[Dict]=None)
     )
     docs = results.get('documents', [[]])[0]
     metas = results.get('metadatas', [[]])[0]
-    distances = results.get('distances', [[]])[0] if 'distances' in results else results.get('scores', [[]])[0]
+    distances = results.get('distances', [[]])[0]
     ids = results.get('ids', [[]])[0]
     hits = []
     for doc, meta, d, i in zip(docs, metas, distances, ids):
@@ -278,7 +270,7 @@ def semantic_search_by_title(title: str, top_k=10, filters: Optional[Dict]=None)
     return hits
 
 # ------------------------------
-# UI
+# UI (same as previous)
 # ------------------------------
 st.title("🎯 Movie Recommender — Semantic Search (Chroma) + Posters (TMDB)")
 
@@ -298,7 +290,7 @@ with st.sidebar:
         else:
             if g.strip():
                 all_genres.add(g.strip())
-    genre_list = sorted(list(all_genres))[:500]
+    genre_list = sorted(list(all_genres))[:200]
     selected_genres = st.multiselect("فلتر حسب النوع (Genres):", options=genre_list)
     years = df['year'].dropna().astype(int) if not df['year'].dropna().empty else pd.Series([2000])
     ymin = int(years.min()) if not years.empty else 1900
@@ -334,7 +326,6 @@ if st.button("Search"):
                 poster_url = None
                 tmdb_rating = None
                 imdb_link = None
-                # attempt TMDB lookup
                 if use_tmdb and TMDB_API_KEY:
                     s = tmdb_search(title)
                     if s:
