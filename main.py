@@ -5,7 +5,6 @@ import numpy as np
 import requests
 import faiss
 from sentence_transformers import SentenceTransformer
-from io import StringIO
 
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 TMDB_SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
@@ -92,53 +91,19 @@ def tmdb_details(movie_id):
     except:
         return None
 
-def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=None):
+
+# ------- simplified semantic search (no filters) -------
+def semantic_search(query, k=10):
     q_emb = model.encode([query], convert_to_numpy=True)
-    distances, idxs = index.search(q_emb, k * 3)
+    distances, idxs = index.search(q_emb, k)
     distances = distances[0]
     idxs = idxs[0]
+    return list(zip(idxs, distances))
 
-    results = []
-    for d, i in zip(distances, idxs):
-        row = df.iloc[i]
-
-        if genre_filters:
-            ok = False
-            for g in genre_filters:
-                if g.lower() in row["genres"].lower():
-                    ok = True
-            if not ok:
-                continue
-
-        if row["year"] is not None:
-            if year_min and row["year"] < year_min:
-                continue
-            if year_max and row["year"] > year_max:
-                continue
-
-        results.append((i, float(d)))
-
-        if len(results) >= k:
-            break
-
-    return results
 
 st.title("Movie Recommender")
 
 query = st.text_input("Enter movie title or description")
-top_k = st.slider("Results", 5, 30, 10)
-
-genres_all = sorted(
-    set(sum([g.split(",") for g in df["genres"].fillna("").tolist()], []))
-)
-selected_genres = st.multiselect("Filter by genre", genres_all)
-
-year_min, year_max = st.slider(
-    "Filter by release year",
-    min_value=1900,
-    max_value=2025,
-    value=(1900, 2025)
-)
 
 use_tmdb = st.checkbox("Show TMDB Poster + Rating", value=True)
 
@@ -146,13 +111,7 @@ if st.button("Search"):
     if query.strip() == "":
         st.warning("Please enter a movie name or query!")
     else:
-        results = semantic_search(
-            query,
-            k=top_k,
-            genre_filters=selected_genres,
-            year_min=year_min,
-            year_max=year_max,
-        )
+        results = semantic_search(query, k=10)
 
         if not results:
             st.error("No results found")
@@ -194,6 +153,6 @@ if st.button("Search"):
                     st.write(f"Genres: {row['genres']}")
                     st.write(row["description"][:400] + "...")
 
-                    st.write(f"Distance: {round(dist, 4)}")
+                    st.write(f"Distance: {round(float(dist), 4)}")
 
                 st.markdown("---")
