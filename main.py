@@ -15,7 +15,7 @@ TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-st.set_page_config(page_title="Movie Recommender (FAISS)", layout="wide")
+st.set_page_config(page_title="Movie Recommender", layout="wide")
 
 
 # ============ LOAD DATA ============
@@ -40,14 +40,12 @@ def load_data():
 df = load_data()
 
 
-# ============ EMBEDDINGS + FAISS ============
+# ============ FAISS ============
 @st.cache_resource
 def load_model():
     return SentenceTransformer(MODEL_NAME)
 
-
 model = load_model()
-
 
 @st.cache_resource
 def build_faiss():
@@ -114,7 +112,6 @@ def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=Non
     for d, i in zip(distances, idxs):
         row = df.iloc[i]
 
-        # genre filter
         if genre_filters:
             ok = False
             for g in genre_filters:
@@ -123,7 +120,6 @@ def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=Non
             if not ok:
                 continue
 
-        # year filter
         if row["year"] is not None:
             if year_min and row["year"] < year_min:
                 continue
@@ -139,28 +135,28 @@ def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=Non
 
 
 # ============ UI ============
-st.title("🎬 Movie Recommender — Semantic Search + FAISS + TMDB")
+st.title("Movie Recommender")
 
-query = st.text_input("اكتب اسم الفيلم أو وصف…")
-top_k = st.slider("عدد النتائج", 5, 30, 10)
+query = st.text_input("Enter movie title or description")
+top_k = st.slider("results", 5, 30, 10)
 
-# genre list
 genres_all = sorted(
     set(sum([g.split(",") for g in df["genres"].fillna("").tolist()], []))
 )
-selected_genres = st.multiselect("فلتر حسب النوع", genres_all)
+selected_genres = st.multiselect("Filter by genre", genres_all)
 
 year_min, year_max = st.slider(
-    "فلتر سنة الإصدار", min_value=1900, max_value=2025, value=(1900, 2025)
+    "Filter by release year:", min_value=1900, max_value=2025, value=(1900, 2025)
 )
 
-use_tmdb = st.checkbox("عرض Poster + Rating من TMDB", value=True)
+use_tmdb = st.checkbox("Show Poster + Rating من TMDB", value=True)
 
 
 # ============ SEARCH BUTTON ============
 if st.button("Search"):
     if query.strip() == "":
-        st.warning("اكتب اسم فيلم أو query!")
+     st.warning("Please enter a movie name or query!")
+
     else:
         results = semantic_search(
             query,
@@ -171,9 +167,9 @@ if st.button("Search"):
         )
 
         if not results:
-            st.error("لا توجد نتائج")
+            st.error("No result found")
         else:
-            st.success(f"تم العثور على {len(results)} نتيجة")
+            st.success(f""Found {len(results)} results"")
 
             for idx, dist in results:
                 row = df.iloc[idx]
@@ -206,8 +202,6 @@ if st.button("Search"):
                     st.markdown(f"### {row['title']} ({row['year']})")
                     if rating:
                         st.write(f"⭐ TMDB Rating: {rating} / 10")
-                    if imdb_link:
-                        st.write(f"[فتح على IMDb]({imdb_link})")
 
                     st.write(f"**Genres:** {row['genres']}")
                     st.write(row["description"][:400] + "...")
