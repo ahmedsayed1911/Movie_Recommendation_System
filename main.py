@@ -1,172 +1,217 @@
 import os
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
+import faiss
 from sentence_transformers import SentenceTransformer
-import chromadb
-from io import StringIO
+from io import BytesIO, StringIO
 
-# -----------------------------------
-# Streamlit page
-# -----------------------------------
-st.set_page_config(page_title="Movie Recommender", layout="wide")
-
-# -----------------------------------
-# TMDB API
-# -----------------------------------
+# ============ CONFIG ============
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+TMDB_SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
+TMDB_MOVIE_URL = "https://api.themoviedb.org/3/movie/{}"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
 
-def tmdb_get(title):
+MODEL_NAME = "all-MiniLM-L6-v2"
+
+st.set_page_config(page_title="Movie Recommender (FAISS)", layout="wide")
+
+
+# ============ LOAD DATA ============
+@st.cache_data
+def load_data():
+    df = pd.read_csv("netflixData.csv")
+    df["title"] = df["Title"].astype(str)
+    df["description"] = df["Description"].fillna("").astype(str)
+    df["genres"] = df["Genres"].fillna("").astype(str)
+
+    def extract_year(v):
+        try:
+            return int(str(v)[:4])
+        except:
+            return None
+
+    df["year"] = df["Release Date"].apply(extract_year)
+    df["combined"] = df["title"] + " " + df["genres"] + " " + df["description"]
+    return df.reset_index(drop=True)
+
+
+df = load_data()
+
+
+# ============ EMBEDDINGS + FAISS ============
+@st.cache_resource
+def load_model():
+    return SentenceTransformer(MODEL_NAME)
+
+
+model = load_model()
+
+
+@st.cache_resource
+def build_faiss():
+    embeddings = model.encode(
+        df["combined"].tolist(), show_progress_bar=True, convert_to_numpy=True
+    )
+    dim = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(embeddings)
+    return index, embeddings
+
+
+index, embeddings = build_faiss()
+
+
+# ============ TMDB HELPERS ============
+@st.cache_data
+def tmdb_search(title: str):
     if not TMDB_API_KEY:
         return None
     try:
         r = requests.get(
-            "https://api.themoviedb.org/3/search/movie",
+            TMDB_SEARCH_URL,
             params={"api_key": TMDB_API_KEY, "query": title},
-            timeout=10
+            timeout=8,
         )
-        r.raise_for_status()
-        results = r.json().get("results", [])
-        if not results:
-            return None
-        movie = results[0]
-
-        details = requests.get(
-            f"https://api.themoviedb.org/3/movie/{movie['id']}",
-            params={"api_key": TMDB_API_KEY},
-            timeout=10
-        ).json()
-
-        poster = movie.get("poster_path")
-        poster_url = TMDB_IMAGE_BASE + poster if poster else None
-
-        imdb_id = requests.get(
-            f"https://api.themoviedb.org/3/movie/{movie['id']}/external_ids",
-            params={"api_key": TMDB_API_KEY}
-        ).json().get("imdb_id")
-
-        imdb_link = f"https://www.imdb.com/title/{imdb_id}" if imdb_id else None
-
-        return {
-            "poster": poster_url,
-            "rating": details.get("vote_average"),
-            "imdb_link": imdb_link
-        }
+        js = r.json()
+        return js.get("results", [None])[0]
     except:
         return None
 
 
-# -----------------------------------
-# Load data
-# -----------------------------------
 @st.cache_data
-def load_data():
-    return pd.read_csv("netflixData.csv")
+def tmdb_details(movie_id):
+    if not TMDB_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            TMDB_MOVIE_URL.format(movie_id),
+            params={"api_key": TMDB_API_KEY},
+            timeout=8,
+        )
+        d = r.json()
 
-df = load_data()
+        r2 = requests.get(
+            TMDB_MOVIE_URL.format(movie_id) + "/external_ids",
+            params={"api_key": TMDB_API_KEY},
+            timeout=8,
+        )
+        d["external_ids"] = r2.json()
+        return d
+    except:
+        return None
 
-df["title"] = df["Title"].astype(str)
-df["desc"] = df["Description"].fillna("").astype(str)
-df["genres"] = df["Genres"].fillna("").astype(str)
-df["year"] = df["Release Date"].fillna(0).astype(int)
 
-# -----------------------------------
-# Embedding model
-# -----------------------------------
-@st.cache_resource
-def get_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+# ============ SEMANTIC SEARCH ============
+def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=None):
+    q_emb = model.encode([query], convert_to_numpy=True)
+    distances, idxs = index.search(q_emb, k * 3)
+    distances = distances[0]
+    idxs = idxs[0]
 
-model = get_model()
+    results = []
+    for d, i in zip(distances, idxs):
+        row = df.iloc[i]
 
-# -----------------------------------
-# Chroma (in-memory ONLY)
-# -----------------------------------
-@st.cache_resource
-def init_chroma():
-    client = chromadb.Client()  # in-memory
-    collection = client.create_collection("movies")
+        # genre filter
+        if genre_filters:
+            ok = False
+            for g in genre_filters:
+                if g.lower() in row["genres"].lower():
+                    ok = True
+            if not ok:
+                continue
 
-    documents = (df["title"] + ". " + df["desc"]).tolist()
-    ids = df.index.astype(str).tolist()
-    embeddings = model.encode(documents).tolist()
+        # year filter
+        if row["year"] is not None:
+            if year_min and row["year"] < year_min:
+                continue
+            if year_max and row["year"] > year_max:
+                continue
 
-    metas = []
-    for _, row in df.iterrows():
-        metas.append({
-            "title": row["title"],
-            "genres": row["genres"],
-            "year": int(row["year"]) if row["year"] else None,
-            "desc": row["desc"]
-        })
+        results.append((i, float(d)))
 
-    collection.add(
-        ids=ids,
-        documents=documents,
-        embeddings=embeddings,
-        metadatas=metas
-    )
+        if len(results) >= k:
+            break
 
-    return collection
+    return results
 
-collection = init_chroma()
 
-# -----------------------------------
-# UI
-# -----------------------------------
-st.title("🎬 Movie Recommender — Semantic Search + Posters")
+# ============ UI ============
+st.title("🎬 Movie Recommender — Semantic Search + FAISS + TMDB")
 
-query = st.text_input("اكتب اسم فيلم أو وصف:")
-topk = st.slider("عدد النتائج:", 5, 30, 10)
+query = st.text_input("اكتب اسم الفيلم أو وصف…")
+top_k = st.slider("عدد النتائج", 5, 30, 10)
 
+# genre list
+genres_all = sorted(
+    set(sum([g.split(",") for g in df["genres"].fillna("").tolist()], []))
+)
+selected_genres = st.multiselect("فلتر حسب النوع", genres_all)
+
+year_min, year_max = st.slider(
+    "فلتر سنة الإصدار", min_value=1900, max_value=2025, value=(1900, 2025)
+)
+
+use_tmdb = st.checkbox("عرض Poster + Rating من TMDB", value=True)
+
+
+# ============ SEARCH BUTTON ============
 if st.button("Search"):
-    if not query.strip():
-        st.warning("اكتب اسم فيلم أو وصف")
+    if query.strip() == "":
+        st.warning("اكتب اسم فيلم أو query!")
     else:
-        query_emb = model.encode([query]).tolist()
-
-        res = collection.query(
-            query_embeddings=query_emb,
-            n_results=topk
+        results = semantic_search(
+            query,
+            k=top_k,
+            genre_filters=selected_genres,
+            year_min=year_min,
+            year_max=year_max,
         )
 
-        hits = []
-        for meta, distance in zip(res["metadatas"][0], res["distances"][0]):
-            hits.append({
-                "title": meta["title"],
-                "genres": meta["genres"],
-                "desc": meta["desc"],
-                "year": meta["year"],
-                "distance": distance
-            })
+        if not results:
+            st.error("لا توجد نتائج")
+        else:
+            st.success(f"تم العثور على {len(results)} نتيجة")
 
-        for h in hits:
-            tmdb = tmdb_get(h["title"])
+            for idx, dist in results:
+                row = df.iloc[idx]
 
-            col1, col2 = st.columns([1, 3])
+                poster = None
+                rating = None
+                imdb_link = None
 
-            with col1:
-                if tmdb and tmdb["poster"]:
-                    st.image(tmdb["poster"], use_column_width=True)
-                else:
-                    st.write("no poster")
+                if use_tmdb:
+                    js = tmdb_search(row["title"])
+                    if js:
+                        details = tmdb_details(js["id"])
+                        if details:
+                            if details.get("poster_path"):
+                                poster = TMDB_IMAGE_BASE + details["poster_path"]
+                            rating = details.get("vote_average")
+                            imdb_id = details["external_ids"].get("imdb_id")
+                            if imdb_id:
+                                imdb_link = f"https://www.imdb.com/title/{imdb_id}"
 
-            with col2:
-                st.markdown(f"### {h['title']} ({h['year']})")
-                st.write(f"**Genres:** {h['genres']}")
-                st.write(h["desc"][:500] + "...")
-                st.write(f"Distance: {round(h['distance'],4)}")
-                if tmdb and tmdb["rating"]:
-                    st.write(f"TMDB Rating: {tmdb['rating']}")
-                if tmdb and tmdb["imdb_link"]:
-                    st.write(f"[IMDb]({tmdb['imdb_link']})")
+                c1, c2 = st.columns([1, 3])
 
-        # download CSV
-        out = pd.DataFrame(hits)
-        st.download_button(
-            "📥 Download as CSV",
-            out.to_csv(index=False),
-            "results.csv",
-            "text/csv"
-        )
+                with c1:
+                    if poster:
+                        st.image(poster, use_column_width=True)
+                    else:
+                        st.write("No Poster")
+
+                with c2:
+                    st.markdown(f"### {row['title']} ({row['year']})")
+                    if rating:
+                        st.write(f"⭐ TMDB Rating: {rating} / 10")
+                    if imdb_link:
+                        st.write(f"[فتح على IMDb]({imdb_link})")
+
+                    st.write(f"**Genres:** {row['genres']}")
+                    st.write(row["description"][:400] + "...")
+
+                    st.write(f"**Distance:** {round(dist, 4)}")
+
+                st.markdown("---")
