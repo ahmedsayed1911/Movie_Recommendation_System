@@ -55,7 +55,6 @@ def build_faiss():
 index, embeddings = build_faiss()
 
 
-# ----------------- TMDB Utils -----------------
 @st.cache_data
 def tmdb_search(title: str):
     if not TMDB_API_KEY:
@@ -94,7 +93,6 @@ def tmdb_details(movie_id):
         return None
 
 
-# ------- simplified semantic search -------
 def semantic_search(query, k=10):
     q_emb = model.encode([query], convert_to_numpy=True)
     distances, idxs = index.search(q_emb, k)
@@ -111,7 +109,7 @@ if st.button("Search"):
     if query.strip() == "":
         st.warning("Please enter a movie name or query!")
     else:
-        results = semantic_search(query, k=10)
+        results = semantic_search(query, k=20)
 
         if not results:
             st.error("No results found")
@@ -125,24 +123,19 @@ if st.button("Search"):
                 rating = None
                 imdb_link = None
 
-                # ---- Get TMDB Data ----
                 js = tmdb_search(row["title"])
                 if js:
                     details = tmdb_details(js["id"])
                     if details:
-                        # poster
                         if details.get("poster_path"):
                             poster = TMDB_IMAGE_BASE + details["poster_path"]
 
-                        # rating
                         rating = details.get("vote_average")
 
-                        # IMDb
                         imdb_id = details["external_ids"].get("imdb_id")
                         if imdb_id:
                             imdb_link = f"https://www.imdb.com/title/{imdb_id}"
 
-                # ----------- UI -----------
                 c1, c2 = st.columns([1, 3])
 
                 with c1:
