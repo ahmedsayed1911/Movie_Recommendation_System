@@ -169,7 +169,7 @@ if st.button("Search"):
         if not results:
             st.error("No result found")
         else:
-            st.success(f""Found {len(results)} results"")
+            st.success(f"Found {len(results)} results")
 
             for idx, dist in results:
                 row = df.iloc[idx]
