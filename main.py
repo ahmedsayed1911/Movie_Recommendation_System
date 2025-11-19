@@ -5,9 +5,8 @@ import numpy as np
 import requests
 import faiss
 from sentence_transformers import SentenceTransformer
-from io import BytesIO, StringIO
+from io import StringIO
 
-# ============ CONFIG ============
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 TMDB_SEARCH_URL = "https://api.themoviedb.org/3/search/movie"
 TMDB_MOVIE_URL = "https://api.themoviedb.org/3/movie/{}"
@@ -17,8 +16,6 @@ MODEL_NAME = "all-MiniLM-L6-v2"
 
 st.set_page_config(page_title="Movie Recommender", layout="wide")
 
-
-# ============ LOAD DATA ============
 @st.cache_data
 def load_data():
     df = pd.read_csv("netflixData.csv")
@@ -36,11 +33,8 @@ def load_data():
     df["combined"] = df["title"] + " " + df["genres"] + " " + df["description"]
     return df.reset_index(drop=True)
 
-
 df = load_data()
 
-
-# ============ FAISS ============
 @st.cache_resource
 def load_model():
     return SentenceTransformer(MODEL_NAME)
@@ -50,18 +44,17 @@ model = load_model()
 @st.cache_resource
 def build_faiss():
     embeddings = model.encode(
-        df["combined"].tolist(), show_progress_bar=True, convert_to_numpy=True
+        df["combined"].tolist(),
+        show_progress_bar=False,
+        convert_to_numpy=True
     )
     dim = embeddings.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
     return index, embeddings
 
-
 index, embeddings = build_faiss()
 
-
-# ============ TMDB HELPERS ============
 @st.cache_data
 def tmdb_search(title: str):
     if not TMDB_API_KEY:
@@ -76,7 +69,6 @@ def tmdb_search(title: str):
         return js.get("results", [None])[0]
     except:
         return None
-
 
 @st.cache_data
 def tmdb_details(movie_id):
@@ -100,8 +92,6 @@ def tmdb_details(movie_id):
     except:
         return None
 
-
-# ============ SEMANTIC SEARCH ============
 def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=None):
     q_emb = model.encode([query], convert_to_numpy=True)
     distances, idxs = index.search(q_emb, k * 3)
@@ -133,12 +123,10 @@ def semantic_search(query, k=10, genre_filters=None, year_min=None, year_max=Non
 
     return results
 
-
-# ============ UI ============
 st.title("Movie Recommender")
 
 query = st.text_input("Enter movie title or description")
-top_k = st.slider("results", 5, 30, 10)
+top_k = st.slider("Results", 5, 30, 10)
 
 genres_all = sorted(
     set(sum([g.split(",") for g in df["genres"].fillna("").tolist()], []))
@@ -146,17 +134,17 @@ genres_all = sorted(
 selected_genres = st.multiselect("Filter by genre", genres_all)
 
 year_min, year_max = st.slider(
-    "Filter by release year:", min_value=1900, max_value=2025, value=(1900, 2025)
+    "Filter by release year",
+    min_value=1900,
+    max_value=2025,
+    value=(1900, 2025)
 )
 
-use_tmdb = st.checkbox("Show Poster + Rating من TMDB", value=True)
+use_tmdb = st.checkbox("Show TMDB Poster + Rating", value=True)
 
-
-# ============ SEARCH BUTTON ============
 if st.button("Search"):
     if query.strip() == "":
-     st.warning("Please enter a movie name or query!")
-
+        st.warning("Please enter a movie name or query!")
     else:
         results = semantic_search(
             query,
@@ -167,7 +155,7 @@ if st.button("Search"):
         )
 
         if not results:
-            st.error("No result found")
+            st.error("No results found")
         else:
             st.success(f"Found {len(results)} results")
 
@@ -201,11 +189,11 @@ if st.button("Search"):
                 with c2:
                     st.markdown(f"### {row['title']} ({row['year']})")
                     if rating:
-                        st.write(f"⭐ TMDB Rating: {rating} / 10")
+                        st.write(f"TMDB Rating: {rating} / 10")
 
-                    st.write(f"**Genres:** {row['genres']}")
+                    st.write(f"Genres: {row['genres']}")
                     st.write(row["description"][:400] + "...")
 
-                    st.write(f"**Distance:** {round(dist, 4)}")
+                    st.write(f"Distance: {round(dist, 4)}")
 
                 st.markdown("---")
