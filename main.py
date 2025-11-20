@@ -111,7 +111,6 @@ if st.button("Search"):
     else:
         results = semantic_search(query, k=20)
 
-        # Sort results manually by distance
         results = sorted(results, key=lambda x: x[1])
 
         if not results:
@@ -159,7 +158,6 @@ if st.button("Search"):
                     st.write(f"Genres: {row['genres']}")
                     st.write(row["description"][:400] + "...")
 
-                    # Changed Distance → Relevance Score
                     st.write(f"Relevance Score: {round(float(dist), 4)}")
 
                 st.markdown("---")
